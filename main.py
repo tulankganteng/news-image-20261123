@@ -1,53 +1,86 @@
 #!/usr/bin/env python3
-"""Entrypoint for the news-image-20261123 make.fun entry.
+"""Write the entry image to the output directory.
 
-Deterministic: validates the bundled entry.png (PNG, 1024x1024, <=1 MiB)
-and copies it byte for byte to the output directory, so every run
-produces identical bytes. Stdlib only.
+Copies the repository's ``entry.png`` to ``/output/entry.png`` (or
+to ``$MAKEFUN_OUTPUT_DIR`` for local runs), validates it is a
+1024x1024 PNG, then reads the copy back and checks it matches the
+source byte for byte (SHA-256). No network, no clock, no randomness.
 """
+
 import hashlib
 import os
-import shutil
 import struct
 import sys
+from pathlib import Path
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(HERE, "entry.png")
+SOURCE_NAME = "entry.png"
+DEFAULT_OUTPUT_DIR = Path("/output")
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+EXPECTED_WIDTH = 1024
+EXPECTED_HEIGHT = 1024
 MAX_BYTES = 1024 * 1024
 
 
-def main():
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
-    if not os.path.isfile(SRC):
-        print("missing entry.png", file=sys.stderr)
+def output_path() -> Path:
+    """Where the finished image goes for this run."""
+    override = os.environ.get("MAKEFUN_OUTPUT_DIR")
+    directory = Path(override) if override else DEFAULT_OUTPUT_DIR
+    return directory / SOURCE_NAME
+
+
+def sha256_hex(data: bytes) -> str:
+    """Hex digest of a byte string."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def check_png(data: bytes) -> tuple[int, int]:
+    """Confirm the bytes are a 1024x1024 PNG under the size limit.
+
+    Returns the image dimensions. Raises ValueError with a plain
+    explanation when the check fails.
+    """
+    if data[:8] != PNG_SIGNATURE:
+        raise ValueError("not a PNG file")
+    width, height = struct.unpack(">II", data[16:24])
+    if (width, height) != (EXPECTED_WIDTH, EXPECTED_HEIGHT):
+        raise ValueError(
+            f"image is {width}x{height}, expected "
+            f"{EXPECTED_WIDTH}x{EXPECTED_HEIGHT}"
+        )
+    if len(data) > MAX_BYTES:
+        raise ValueError(f"image is {len(data)} bytes, over the 1 MiB limit")
+    return width, height
+
+
+def main() -> int:
+    source = Path(__file__).resolve().parent / SOURCE_NAME
+    if not source.is_file():
+        print(f"error: {source} not found", file=sys.stderr)
         return 1
-    with open(SRC, "rb") as f:
-        head = f.read(33)
-    if head[:8] != b"\x89PNG\r\n\x1a\n":
-        print("entry.png is not a PNG", file=sys.stderr)
+
+    original = source.read_bytes()
+    try:
+        width, height = check_png(original)
+    except ValueError as exc:
+        print(f"error: {SOURCE_NAME} invalid: {exc}", file=sys.stderr)
         return 1
-    width, height = struct.unpack(">II", head[16:24])
-    if (width, height) != (1024, 1024):
-        print(f"entry.png is {width}x{height}, expected 1024x1024", file=sys.stderr)
+    digest = sha256_hex(original)
+
+    destination = output_path()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(original)
+
+    written = destination.read_bytes()
+    if sha256_hex(written) != digest:
+        print("error: copy does not match the source", file=sys.stderr)
         return 1
-    size = os.path.getsize(SRC)
-    if size > MAX_BYTES:
-        print(f"entry.png is {size} bytes, over the 1 MiB limit", file=sys.stderr)
-        return 1
-    os.makedirs(out_dir, exist_ok=True)
-    dst = os.path.join(out_dir, "entry.png")
-    shutil.copyfile(SRC, dst)
-    # Read the copy back and confirm it matches the source byte for byte.
-    with open(SRC, "rb") as f:
-        src_hash = hashlib.sha256(f.read()).hexdigest()
-    with open(dst, "rb") as f:
-        dst_hash = hashlib.sha256(f.read()).hexdigest()
-    if src_hash != dst_hash:
-        print("output does not match entry.png", file=sys.stderr)
-        return 1
-    print(f"wrote {dst} ({size} bytes, 1024x1024 PNG, sha256 {dst_hash[:16]}...)")
+
+    print(
+        f"wrote {destination} ({len(written)} bytes, "
+        f"{width}x{height} PNG, sha256 {digest[:16]}...)"
+    )
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
